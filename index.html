@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PONG — VOID STRIKER</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      font-family: 'Courier New', monospace;
+      overflow: hidden;
+    }
+
+    #title {
+      color: #00f7ff;
+      font-size: 13px;
+      letter-spacing: 8px;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+      text-shadow: 0 0 10px #00f7ff, 0 0 20px #00f7ff;
+      opacity: 0.8;
+    }
+
+    canvas {
+      display: block;
+      border: 1px solid #00f7ff33;
+      box-shadow:
+        0 0 20px #00f7ff44,
+        0 0 60px #00f7ff22,
+        inset 0 0 30px #00000066;
+    }
+
+    #subtitle {
+      color: #ffffff33;
+      font-size: 10px;
+      letter-spacing: 4px;
+      margin-top: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div id="title">VOID STRIKER</div>
+  <canvas id="gameCanvas"></canvas>
+  <div id="subtitle">← → TO MOVE &nbsp;|&nbsp; SPACE TO LAUNCH &nbsp;|&nbsp; FIRST TO 7</div>
+
+  <script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // Canvas dimensions
+    const W = 480;
+    const H = 640;
+    canvas.width = W;
+    canvas.height = H;
+
+    // ── Constants ──────────────────────────────────────────────────────────────
+    const PADDLE_W = 90;
+    const PADDLE_H = 10;
+    const PADDLE_SPEED = 5.5;
+    const BALL_RADIUS = 7;
+    const BALL_BASE_SPEED = 3.0;
+    const BALL_SPEED_INCREMENT = 0.35; // per hit
+    const WIN_SCORE = 7;
+    const CPU_SPEED = PADDLE_SPEED;    // same raw speed as player
+    const CPU_ERROR_RANGE = 18;        // pixels of deliberate imprecision — makes CPU beatable
+
+    // ── Stars (background layer) ───────────────────────────────────────────────
+    const STAR_COUNT = 120;
+    const stars = Array.from({ length: STAR_COUNT }, () => ({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      r: Math.random() * 1.4 + 0.2,
+      alpha: Math.random() * 0.7 + 0.2,
+      twinkleSpeed: Math.random() * 0.02 + 0.005,
+      twinkleOffset: Math.random() * Math.PI * 2,
+    }));
+
+    // ── Game State ─────────────────────────────────────────────────────────────
+    let state; // 'start' | 'playing' | 'scored' | 'over'
+    let playerScore, cpuScore;
+    let player, cpu, ball;
+    let keys = {};
+    let hitCount;       // rally hit counter — drives speed increase
+    let scoredBy;       // 'player' | 'cpu'
+    let winner;
+    let cpuTargetX;     // CPU "aims" at a slightly wrong target for imperfection
+    let particles = []; // impact particle effects
+
+    function initGame() {
+      playerScore = 0;
+      cpuScore = 0;
+      state = 'start';
+      initRound();
+    }
+
+    function initRound() {
+      player = { x: W / 2 - PADDLE_W / 2, y: H - 30, w: PADDLE_W, h: PADDLE_H };
+      cpu    = { x: W / 2 - PADDLE_W / 2, y: 20,      w: PADDLE_W, h: PADDLE_H };
+      hitCount = 0;
+      particles = [];
+      launchBall();
+    }
+
+    function launchBall() {
+      // Random horizontal angle, always launching toward the player first
+      const angle = (Math.random() * 0.6 + 0.2); // radians from vertical, 0.2–0.8
+      const dir = Math.random() < 0.5 ? 1 : -1;
+      ball = {
+        x: W / 2,
+        y: H / 2,
+        dx: Math.sin(angle) * dir * BALL_BASE_SPEED,
+        dy: BALL_BASE_SPEED,  // always moves toward player first
+        speed: BALL_BASE_SPEED,
+      };
+      cpuTargetX = cpu.x + cpu.w / 2; // reset CPU aim
+    }
+
+    // ── Input ──────────────────────────────────────────────────────────────────
+    document.addEventListener('keydown', e => {
+      keys[e.code] = true;
+      if (e.code === 'Space' || e.code === 'Enter') {
+        if (state === 'over') {
+          initGame();
+        } else if (state === 'start' || state === 'scored') {
+          state = 'playing';
+        }
+      }
+      // Prevent arrow keys from scrolling the page
+      if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space'].includes(e.code)) {
+        e.preventDefault();
+      }
+    });
+    document.addEventListener('keyup', e => { keys[e.code] = false; });
+
+    // ── Physics helpers ────────────────────────────────────────────────────────
+    function speedUpBall() {
+      hitCount++;
+      ball.speed += BALL_SPEED_INCREMENT;
+      // Normalise direction vector to new speed
+      const mag = Math.hypot(ball.dx, ball.dy);
+      ball.dx = (ball.dx / mag) * ball.speed;
+      ball.dy = (ball.dy / mag) * ball.speed;
+    }
+
+    function spawnParticles(x, y, color) {
+      for (let i = 0; i < 12; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = Math.random() * 3 + 1;
+        particles.push({
+          x, y,
+          dx: Math.cos(angle) * speed,
+          dy: Math.sin(angle) * speed,
+          life: 1.0,
+          decay: Math.random() * 0.06 + 0.03,
+          r: Math.random() * 3 + 1,
+          color,
+        });
+      }
+    }
+
+    // ── Update ─────────────────────────────────────────────────────────────────
+    function update() {
+      if (state !== 'playing') return;
+
+      // Player movement
+      if (keys['ArrowLeft'])  player.x = Math.max(0, player.x - PADDLE_SPEED);
+      if (keys['ArrowRight']) player.x = Math.min(W - player.w, player.x + PADDLE_SPEED);
+
+      // CPU tracking — moves toward a slightly imprecise target for fairness
+      // Recalculate target lazily when ball is moving toward CPU
+      if (ball.dy < 0) {
+        // Predict where ball will land (rough X at CPU paddle y level)
+        const timeToReach = (ball.y - (cpu.y + cpu.h)) / (-ball.dy || 1);
+        const predictedX = ball.x + ball.dx * timeToReach;
+        // Add controlled error so CPU isn't perfect
+        cpuTargetX = predictedX + (Math.random() - 0.5) * CPU_ERROR_RANGE;
+      }
+      const cpuCenter = cpu.x + cpu.w / 2;
+      const diff = cpuTargetX - cpuCenter;
+      if (Math.abs(diff) > 1) {
+        const move = Math.min(Math.abs(diff), CPU_SPEED) * Math.sign(diff);
+        cpu.x = Math.max(0, Math.min(W - cpu.w, cpu.x + move));
+      }
+
+      // Ball movement
+      ball.x += ball.dx;
+      ball.y += ball.dy;
+
+      // Wall bounce (left / right)
+      if (ball.x - BALL_RADIUS <= 0) {
+        ball.x = BALL_RADIUS;
+        ball.dx *= -1;
+        spawnParticles(ball.x, ball.y, '#00f7ff');
+      }
+      if (ball.x + BALL_RADIUS >= W) {
+        ball.x = W - BALL_RADIUS;
+        ball.dx *= -1;
+        spawnParticles(ball.x, ball.y, '#00f7ff');
+      }
+
+      // Paddle collision — player (bottom)
+      if (
+        ball.dy > 0 &&
+        ball.y + BALL_RADIUS >= player.y &&
+        ball.y + BALL_RADIUS <= player.y + player.h + ball.speed &&
+        ball.x >= player.x &&
+        ball.x <= player.x + player.w
+      ) {
+        ball.y = player.y - BALL_RADIUS;
+        // Deflection angle based on where ball hits the paddle (adds control)
+        const hitPos = (ball.x - player.x) / player.w; // 0–1
+        const angle = (hitPos - 0.5) * Math.PI * 0.65; // -~60° to +~60°
+        ball.dx = Math.sin(angle) * ball.speed;
+        ball.dy = -Math.abs(Math.cos(angle) * ball.speed);
+        speedUpBall();
+        spawnParticles(ball.x, ball.y, '#a78bfa');
+      }
+
+      // Paddle collision — CPU (top)
+      if (
+        ball.dy < 0 &&
+        ball.y - BALL_RADIUS <= cpu.y + cpu.h &&
+        ball.y - BALL_RADIUS >= cpu.y - ball.speed &&
+        ball.x >= cpu.x &&
+        ball.x <= cpu.x + cpu.w
+      ) {
+        ball.y = cpu.y + cpu.h + BALL_RADIUS;
+        const hitPos = (ball.x - cpu.x) / cpu.w;
+        const angle = (hitPos - 0.5) * Math.PI * 0.65;
+        ball.dx = Math.sin(angle) * ball.speed;
+        ball.dy = Math.abs(Math.cos(angle) * ball.speed);
+        speedUpBall();
+        spawnParticles(ball.x, ball.y, '#f43f5e');
+      }
+
+      // Score — ball exits top (CPU misses → player scores)
+      if (ball.y + BALL_RADIUS < 0) {
+        playerScore++;
+        resolvePoint('player');
+      }
+
+      // Score — ball exits bottom (player misses → CPU scores)
+      if (ball.y - BALL_RADIUS > H) {
+        cpuScore++;
+        resolvePoint('cpu');
+      }
+
+      // Update particles
+      particles = particles.filter(p => p.life > 0);
+      particles.forEach(p => {
+        p.x += p.dx;
+        p.y += p.dy;
+        p.life -= p.decay;
+        p.dx *= 0.92;
+        p.dy *= 0.92;
+      });
+    }
+
+    function resolvePoint(scorer) {
+      scoredBy = scorer;
+      if (playerScore >= WIN_SCORE) {
+        winner = 'player';
+        state = 'over';
+      } else if (cpuScore >= WIN_SCORE) {
+        winner = 'cpu';
+        state = 'over';
+      } else {
+        initRound();       // reset paddles and ball position
+        state = 'scored';  // wait for Space before launching
+      }
+    }
+
+    // ── Draw helpers ───────────────────────────────────────────────────────────
+    function drawStars(t) {
+      stars.forEach(s => {
+        const alpha = s.alpha * (0.6 + 0.4 * Math.sin(t * s.twinkleSpeed + s.twinkleOffset));
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+        ctx.fill();
+      });
+    }
+
+    function drawNebula() {
+      // Subtle background glow blobs
+      const g1 = ctx.createRadialGradient(W * 0.2, H * 0.3, 0, W * 0.2, H * 0.3, 160);
+      g1.addColorStop(0, 'rgba(99,37,210,0.07)');
+      g1.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g1;
+      ctx.fillRect(0, 0, W, H);
+
+      const g2 = ctx.createRadialGradient(W * 0.8, H * 0.7, 0, W * 0.8, H * 0.7, 180);
+      g2.addColorStop(0, 'rgba(0,150,210,0.06)');
+      g2.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g2;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    function drawCenterLine() {
+      ctx.setLineDash([6, 10]);
+      ctx.strokeStyle = 'rgba(0,247,255,0.12)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, H / 2);
+      ctx.lineTo(W, H / 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    function drawPaddle(paddle, color, glowColor) {
+      const { x, y, w, h } = paddle;
+      const rx = 5; // corner radius
+
+      // Glow shadow
+      ctx.shadowColor = glowColor;
+      ctx.shadowBlur = 18;
+
+      // Paddle body with gradient
+      const grad = ctx.createLinearGradient(x, y, x + w, y);
+      grad.addColorStop(0,   color + '88');
+      grad.addColorStop(0.3, color + 'ff');
+      grad.addColorStop(0.7, color + 'ff');
+      grad.addColorStop(1,   color + '88');
+
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, rx);
+      ctx.fill();
+
+      // Bright center line
+      ctx.fillStyle = '#ffffff55';
+      ctx.beginPath();
+      ctx.roundRect(x + 8, y + 3, w - 16, 2, 1);
+      ctx.fill();
+
+      ctx.shadowBlur = 0;
+    }
+
+    function drawBall(t) {
+      // Pulsing outer glow
+      const pulse = 1 + 0.25 * Math.sin(t * 0.08);
+
+      ctx.shadowColor = '#00f7ff';
+      ctx.shadowBlur = 20 * pulse;
+
+      // Ball body
+      const grad = ctx.createRadialGradient(ball.x - 2, ball.y - 2, 1, ball.x, ball.y, BALL_RADIUS);
+      grad.addColorStop(0, '#ffffff');
+      grad.addColorStop(0.4, '#a5f3fc');
+      grad.addColorStop(1, '#0891b2');
+
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, BALL_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = grad;
+      ctx.fill();
+
+      ctx.shadowBlur = 0;
+    }
+
+    function drawParticles() {
+      particles.forEach(p => {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r * p.life, 0, Math.PI * 2);
+        ctx.fillStyle = p.color + Math.floor(p.life * 255).toString(16).padStart(2, '0');
+        ctx.fill();
+      });
+    }
+
+    function drawScore() {
+      ctx.textAlign = 'center';
+
+      // CPU score (top)
+      ctx.font = 'bold 28px "Courier New"';
+      ctx.fillStyle = '#f43f5e';
+      ctx.shadowColor = '#f43f5e';
+      ctx.shadowBlur = 12;
+      ctx.fillText(cpuScore, W / 2, H / 2 - 20);
+
+      // Player score (bottom)
+      ctx.fillStyle = '#a78bfa';
+      ctx.shadowColor = '#a78bfa';
+      ctx.fillText(playerScore, W / 2, H / 2 + 40);
+
+      ctx.shadowBlur = 0;
+
+      // Labels
+      ctx.font = '9px "Courier New"';
+      ctx.letterSpacing = '3px';
+      ctx.fillStyle = 'rgba(243,63,94,0.5)';
+      ctx.fillText('CPU', W / 2, H / 2 - 38);
+      ctx.fillStyle = 'rgba(167,139,250,0.5)';
+      ctx.fillText('YOU', W / 2, H / 2 + 52);
+      ctx.letterSpacing = '0px';
+    }
+
+    function drawOverlay(headline, sub1, sub2) {
+      // Dim panel
+      ctx.fillStyle = 'rgba(0,0,0,0.65)';
+      ctx.fillRect(0, H / 2 - 80, W, 160);
+
+      // Scanline texture effect over panel
+      for (let i = H / 2 - 80; i < H / 2 + 80; i += 3) {
+        ctx.fillStyle = 'rgba(0,0,0,0.08)';
+        ctx.fillRect(0, i, W, 1);
+      }
+
+      ctx.textAlign = 'center';
+      ctx.font = 'bold 32px "Courier New"';
+      ctx.fillStyle = '#00f7ff';
+      ctx.shadowColor = '#00f7ff';
+      ctx.shadowBlur = 20;
+      ctx.fillText(headline, W / 2, H / 2 - 28);
+
+      ctx.shadowBlur = 0;
+      ctx.font = '13px "Courier New"';
+      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.fillText(sub1, W / 2, H / 2 + 8);
+
+      if (sub2) {
+        ctx.fillStyle = 'rgba(0,247,255,0.4)';
+        ctx.font = '11px "Courier New"';
+        ctx.fillText(sub2, W / 2, H / 2 + 30);
+      }
+    }
+
+    function drawScoredFlash() {
+      const label = scoredBy === 'player' ? '✦  POINT  ✦' : '✦  MISS  ✦';
+      const color = scoredBy === 'player' ? '#a78bfa' : '#f43f5e';
+      ctx.textAlign = 'center';
+      ctx.font = 'bold 22px "Courier New"';
+      ctx.fillStyle = color;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 16;
+      ctx.fillText(label, W / 2, H / 2 - 28);
+      ctx.shadowBlur = 0;
+      ctx.font = '11px "Courier New"';
+      ctx.fillStyle = 'rgba(0,247,255,0.5)';
+      ctx.fillText('PRESS SPACE TO LAUNCH', W / 2, H / 2 + 2);
+    }
+
+    // ── Speed indicator (top-right HUD) ───────────────────────────────────────
+    function drawSpeedHUD() {
+      const bars = Math.min(hitCount, 10);
+      const barW = 6, barH = 14, gap = 3;
+      const startX = W - 16 - bars * (barW + gap);
+
+      ctx.textAlign = 'right';
+      ctx.font = '8px "Courier New"';
+      ctx.fillStyle = 'rgba(0,247,255,0.3)';
+      ctx.fillText('SPEED', W - 10, H / 2 + 70);
+
+      for (let i = 0; i < bars; i++) {
+        const alpha = 0.3 + (i / 10) * 0.7;
+        const hue = i < 4 ? '#00f7ff' : i < 7 ? '#a78bfa' : '#f43f5e';
+        ctx.fillStyle = hue + Math.floor(alpha * 255).toString(16).padStart(2, '0');
+        ctx.fillRect(W - 14 - (bars - i) * (barW + gap), H / 2 + 56, barW, barH);
+      }
+    }
+
+    // ── Main Loop ──────────────────────────────────────────────────────────────
+    let frame = 0;
+
+    function loop() {
+      requestAnimationFrame(loop);
+      frame++;
+
+      // Background
+      ctx.fillStyle = '#030712';
+      ctx.fillRect(0, 0, W, H);
+
+      drawNebula();
+      drawStars(frame);
+      drawCenterLine();
+
+      update();
+
+      drawScore();
+      drawSpeedHUD();
+      drawPaddle(player, '#a78bfa', '#7c3aed');
+      drawPaddle(cpu,    '#f43f5e', '#be123c');
+
+      if (state !== 'start') drawBall(frame);
+      drawParticles();
+
+      // Overlay states
+      if (state === 'start') {
+        drawOverlay('VOID STRIKER', '← → TO MOVE YOUR PADDLE', 'PRESS SPACE TO LAUNCH');
+      } else if (state === 'scored') {
+        drawScoredFlash();
+      } else if (state === 'over') {
+        const headline = winner === 'player' ? 'VICTORY' : 'DEFEAT';
+        const sub = winner === 'player' ? `${playerScore} — ${cpuScore}  |  YOU WIN` : `${cpuScore} — ${playerScore}  |  CPU WINS`;
+        drawOverlay(headline, sub, 'PRESS SPACE TO PLAY AGAIN');
+      }
+    }
+
+    initGame();
+    loop();
+  </script>
+</body>
+</html>
